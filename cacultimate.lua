@@ -1,5 +1,5 @@
 --[[
-    CAC ULTIMATE SUITE - V4.5 (MAXIMIZE AUTO-REJOIN)
+    CAC ULTIMATE SUITE - V4.5.1 (AUTO PUBLISH RESUME HOTFIX)
     Feature: Files > 9.5MB are saved locally to 'ROOT/dumps'.
     Engine: Hybrid R6/R15 + Heavy Duty Logic + 100MB Fix + Premium UI.
     Language: English Only.
@@ -1104,7 +1104,7 @@ local function ValidateKey(inputKey, forceSwitch)
         key = cleanKey,
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5"
+        client_version = "cacultimate-v4.5.1"
     })
 
     if not ok then
@@ -1174,7 +1174,7 @@ local function TryAutoLogin(force)
     local ok, data = ApiPost(AuthLogic.SessionAutoStartRoute, {
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5"
+        client_version = "cacultimate-v4.5.1"
     })
 
     if ok and data and data.ok then
@@ -1720,7 +1720,7 @@ local function UploadToDiscord(realFilename, fileContent, count, tag)
             title = "📦 Dump Success: " .. tag,
             description = "Rigs: **" .. count .. "**\nFile: `" .. finalName .. "`",
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5" }
+            footer = { text = "CAC Ultimate V4.5.1" }
         }}
     }) .. "\r\n"
 
@@ -1777,7 +1777,7 @@ local function UploadTextToDiscord(realFilename, fileContent, tag, summary)
             title = "CAC " .. safeTag,
             description = tostring(summary or ("Generated file: `" .. finalName .. "`")),
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5" }
+            footer = { text = "CAC Ultimate V4.5.1" }
         }}
     }) .. "\r\n"
 
@@ -3002,13 +3002,6 @@ local function BuildCollectedFromCodeRecords(records)
 end
 
 local function RunCodeQueueState(queueState, statusLabel)
-    if not ResolveCommunityOutfitsRemote(6) then
-        return Notify("Error", "CommunityOutfitsRemote was not found.")
-    end
-    if not ResolveSerializationModule(6) then
-        return Notify("Error", "OutfitSerializationFunctions module was not found.")
-    end
-
     local codes = queueState.codes or {}
     local records = queueState.records or {}
     local nextIndex = tonumber(queueState.next_index) or 1
@@ -3024,8 +3017,19 @@ local function RunCodeQueueState(queueState, statusLabel)
     local maxDelay = 2.2
     local maxAttempts = 12
 
-    WarmupCommunityOutfits()
+    if statusLabel then
+        statusLabel.Text = "Status: Code queue found " .. tostring(#codes) .. " targets. Starting at index " .. tostring(nextIndex) .. "..."
+    end
     Notify("System", "Starting queue for " .. #codes .. " targets.")
+
+    if not ResolveCommunityOutfitsRemote(3) then
+        return Notify("Error", "CommunityOutfitsRemote was not found.")
+    end
+    if not ResolveSerializationModule(3) then
+        return Notify("Error", "OutfitSerializationFunctions module was not found.")
+    end
+
+    task.spawn(WarmupCommunityOutfits)
 
     for i = nextIndex, #codes do
         if IsCancelled() then
@@ -3167,6 +3171,10 @@ function Dumpers.ResumeCodeQueue(statusLabel)
     local state = ReadQueueState()
     if not state or state.task ~= "code_extract" then
         return Notify("Info", "No pending code queue was found.")
+    end
+    if statusLabel then
+        local total = type(state.codes) == "table" and #state.codes or 0
+        statusLabel.Text = "Status: Code queue found " .. tostring(total) .. " targets. Starting at index " .. tostring(state.next_index or 1) .. "..."
     end
     Notify("System", "Resuming code queue from index " .. tostring(state.next_index or 1) .. ".")
     RunCodeQueueState(state, statusLabel)
@@ -4551,6 +4559,17 @@ local function IsCooldownError(value)
         or (string.find(text, "please wait", 1, true) ~= nil and string.find(text, "again", 1, true) ~= nil)
 end
 
+local function IsAlreadyPublishedError(value)
+    if value == nil then
+        return false
+    end
+
+    local text = string.lower(tostring(value))
+    return (string.find(text, "already", 1, true) ~= nil and string.find(text, "publish", 1, true) ~= nil)
+        or string.find(text, "already exists", 1, true) ~= nil
+        or string.find(text, "duplicate", 1, true) ~= nil
+end
+
 local function CooldownError(seconds)
     local n = tonumber(seconds)
     if n then
@@ -4894,6 +4913,9 @@ local function PublishCurrentOutfitForCode(outfitName)
         if IsCooldownError(msg) then
             return nil, CooldownError(GetCooldownWaitSeconds(msg))
         end
+        if IsAlreadyPublishedError(msg) then
+            return nil, "AlreadyPublished"
+        end
         return nil, msg
     end
 
@@ -4910,13 +4932,14 @@ local function PublishSavedOutfitAndGenerateCode(item, statusLabel)
     local publishedId = TryResolvePublishedOutfitIdByLocalId(item and item.outfit_id)
         or (item and item.published_outfit_id)
     if publishedId then
+        if item then
+            item.published_outfit_id = tostring(publishedId)
+        end
         local code, err, usedId = GenerateCodeForOutfitId(publishedId)
         if code then
             return code, nil, usedId or publishedId, "published_id"
         end
-        if IsCooldownError(err) then
-            return nil, CooldownError(GetCooldownWaitSeconds(err)), publishedId, "published_id"
-        end
+        return nil, err or "CodeGenerationFailed", publishedId, "published_id"
     end
 
     if statusLabel then
@@ -4932,12 +4955,28 @@ local function PublishSavedOutfitAndGenerateCode(item, statusLabel)
     end
     local publishedInfo, publishErr = PublishCurrentOutfitForCode(item and item.name)
     if not publishedInfo then
+        if IsAlreadyPublishedError(publishErr) then
+            local resolvedId = TryResolvePublishedOutfitIdByLocalId(item and item.outfit_id)
+            if resolvedId then
+                if item then
+                    item.published_outfit_id = tostring(resolvedId)
+                end
+                local code, err, usedId = GenerateCodeForOutfitId(resolvedId)
+                if code then
+                    return code, nil, usedId or resolvedId, "published_id"
+                end
+                return nil, err or "CodeGenerationFailed", resolvedId, "published_id"
+            end
+        end
         return nil, publishErr or "PublishFailed", nil, "publish_failed"
     end
 
     local newPublishedId = publishedInfo.Id or publishedInfo.id or publishedInfo.OutfitId or publishedInfo.OutfitID
     if not newPublishedId then
         return nil, "Published outfit id missing.", nil, "publish_failed"
+    end
+    if item then
+        item.published_outfit_id = tostring(newPublishedId)
     end
 
     if statusLabel then
@@ -5053,10 +5092,35 @@ local function CollectFolderPayloadsForAutoPublish(mode, folderInput, statusLabe
     return payloads, nil
 end
 
+local function NormalizeAutoPublishProgress(queueState)
+    local rawResults = type(queueState.results) == "table" and queueState.results or {}
+    local cleanResults = {}
+    local completed = {}
+
+    for _, row in ipairs(rawResults) do
+        local code = NormalizePublishedCode(row and row.code or nil)
+        local index = tonumber(row and row.index)
+        if code and index and index > 0 then
+            row.code = code
+            completed[index] = true
+            table.insert(cleanResults, row)
+        end
+    end
+
+    local expected = 1
+    while completed[expected] do
+        expected = expected + 1
+    end
+
+    queueState.results = cleanResults
+    queueState.next_index = expected
+    return expected, cleanResults
+end
+
 local function RunAutoPublishQueueState(queueState, statusLabel)
     local items = queueState.items or {}
-    local results = queueState.results or {}
-    local nextIndex = tonumber(queueState.next_index) or 1
+    local nextIndex, results = NormalizeAutoPublishProgress(queueState)
+    nextIndex = math.clamp(tonumber(nextIndex) or 1, 1, math.max(#items + 1, 1))
     local waitSeconds = tonumber(queueState.wait_seconds) or 0.65
     waitSeconds = math.clamp(waitSeconds, 0.05, 4)
     local successSinceRejoin = tonumber(queueState.success_since_rejoin) or 0
@@ -5108,6 +5172,11 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
         if not generatedCode then
             generatedCode, genErr, usedId, sourceKind = PublishSavedOutfitAndGenerateCode(item, statusLabel)
         end
+        if usedId and tostring(usedId) ~= "" and (sourceKind == "published" or sourceKind == "published_id") then
+            item.published_outfit_id = tostring(usedId)
+            queueState.items = items
+            WriteQueueState(queueState)
+        end
 
         if not generatedCode and IsCooldownError(genErr) then
             local cooldownWait = GetCooldownWaitSeconds(genErr)
@@ -5138,6 +5207,11 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
             end
             task.wait(localWait)
             generatedCode, genErr, usedId, sourceKind = PublishSavedOutfitAndGenerateCode(item, statusLabel)
+            if usedId and tostring(usedId) ~= "" and (sourceKind == "published" or sourceKind == "published_id") then
+                item.published_outfit_id = tostring(usedId)
+                queueState.items = items
+                WriteQueueState(queueState)
+            end
         end
 
         if generatedCode then
@@ -5164,12 +5238,41 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
                 successSinceRejoin = successSinceRejoin + 1
             end
         else
-            table.insert(results, {
-                index = i,
-                outfit_name = displayName,
-                outfit_id = tostring(item.outfit_id or ""),
-                error = tostring(genErr or "failed")
-            })
+            queueState.next_index = i
+            queueState.results = results
+            queueState.items = items
+            queueState.success_since_rejoin = successSinceRejoin
+            queueState.last_error = tostring(genErr or "failed")
+            WriteQueueState(queueState)
+
+            if autoRejoinEnabled or maximizeAutoRejoin then
+                local partialRejoinKey = "auto_publish_partial:" .. tostring(i)
+                if queueState.last_rejoin_key == partialRejoinKey then
+                    queueState.rejoin_loop_count = (tonumber(queueState.rejoin_loop_count) or 0) + 1
+                else
+                    queueState.last_rejoin_key = partialRejoinKey
+                    queueState.rejoin_loop_count = 1
+                end
+                WriteQueueState(queueState)
+                if tonumber(queueState.rejoin_loop_count) and queueState.rejoin_loop_count > 2 then
+                    if statusLabel then
+                        statusLabel.Text = "Status: Auto publish paused at index " .. tostring(i) .. " after repeated partial retries. Queue saved."
+                    end
+                    Notify("Auto Publish", "Paused at index " .. tostring(i) .. " after repeated partial retries. Queue saved.")
+                    return "paused"
+                end
+                if statusLabel then
+                    statusLabel.Text = "Status: Auto publish kept index " .. tostring(i) .. " pending after a partial result. Rejoining now..."
+                end
+                AttemptAutoRejoin("Auto publish preserved pending index " .. tostring(i) .. " after partial publish state.", autoRejoinMode, true)
+                return "rejoin"
+            end
+
+            if statusLabel then
+                statusLabel.Text = "Status: Auto publish paused at index " .. tostring(i) .. ". Queue saved. Error: " .. tostring(genErr or "failed")
+            end
+            Notify("Auto Publish", "Paused at index " .. tostring(i) .. ". Queue saved; item was not marked complete.")
+            return "paused"
         end
 
         queueState.next_index = i + 1
@@ -5371,8 +5474,8 @@ local function ApplyUIPostBuildPatches()
     for _, obj in ipairs(playerGui:GetDescendants()) do
         if obj:IsA("TextLabel") then
             local txt = tostring(obj.Text or "")
-            if txt:find("CAC Ultimate", 1, true) and (txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
-                obj.Text = txt:gsub("v4%.3", "v4.5"):gsub("v4%.4", "v4.5"):gsub("v3%.0", "v4.5")
+            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.1", 1, true) and (txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
+                obj.Text = txt:gsub("v4%.3", "v4.5.1"):gsub("v4%.4", "v4.5.1"):gsub("v4%.5", "v4.5.1"):gsub("v3%.0", "v4.5.1")
             end
 
             if txt == "PROCESS STATUS" then
@@ -5420,6 +5523,10 @@ TryResumePendingQueue = function()
     end
 
     if state.task == "code_extract" then
+        if ResumeExtractorStatusRef then
+            local total = type(state.codes) == "table" and #state.codes or 0
+            SetStatusLabel(ResumeExtractorStatusRef, "Status: Code queue found " .. tostring(total) .. " targets. Starting at index " .. tostring(state.next_index or 1) .. "...")
+        end
         Notify("System", "Pending code queue detected. Resuming automatically...")
         RunExtractionTask("Code Dump Resume", ResumeExtractorStatusRef, function(status)
             Dumpers.ResumeCodeQueue(status)
@@ -5441,6 +5548,17 @@ function UnlockUI()
     local TabTools = Window:CreateTab("Extractors", "rbxassetid://10888331510")
     local TabAutoPublish = Window:CreateTab("Auto Publish", "rbxassetid://6031265976")
     local TabSettings = Window:CreateTab("Settings", "rbxassetid://10888331510")
+    local ExtractorStatus = { Text = "System Status: Awaiting Command..." }
+    SetStatusLabel(ExtractorStatus, "System Status: Awaiting Command...")
+    ResumeExtractorStatusRef = ExtractorStatus
+    local queueResumeMode = HasActiveQueueResume()
+    local earlyResumeStarted = false
+    if queueResumeMode then
+        earlyResumeStarted = true
+        task.spawn(function()
+            TryResumePendingQueue()
+        end)
+    end
 
     -- DASHBOARD
     TabHome:CreateSection("Session Details")
@@ -5482,16 +5600,13 @@ function UnlockUI()
     })
 
     TabHome:CreateSection("Information")
-    TabHome:CreateLabel("v4.5 (Maximize Auto-Rejoin test build.)")
+    TabHome:CreateLabel("v4.5.1 (Auto publish resume hotfix.)")
     TabHome:CreateLabel("Executor: " .. tostring(ExecutorName))
     TabHome:CreateLabel("UI Library Source: " .. tostring(LibrarySource))
     TabHome:CreateLabel("Queue Save Path: " .. tostring(QueueStatePath))
 
     -- EXTRACTORS / TOOLS
     TabTools:CreateSection("Queue Monitor")
-    local ExtractorStatus = { Text = "System Status: Awaiting Command..." }
-    SetStatusLabel(ExtractorStatus, "System Status: Awaiting Command...")
-    ResumeExtractorStatusRef = ExtractorStatus
     TabTools:CreateDashboardStats({
         {
             Title = "Queue State",
@@ -5788,16 +5903,17 @@ function UnlockUI()
     })
     TabSettings:CreateLabel("When a saved queue rejoins, CAC skips the long login screen and validates the session in the background.")
 
-    local queueResumeMode = HasActiveQueueResume()
     if queueResumeMode then
         task.delay(2.8, ScheduleUIPostBuildPatches)
     else
         ScheduleUIPostBuildPatches()
     end
 
-    task.delay(queueResumeMode and 0.12 or 0.8, function()
-        TryResumePendingQueue()
-    end)
+    if not earlyResumeStarted then
+        task.delay(queueResumeMode and 0.12 or 0.8, function()
+            TryResumePendingQueue()
+        end)
+    end
 end
 
 -- ==================================================================
