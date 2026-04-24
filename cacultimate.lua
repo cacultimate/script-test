@@ -1,5 +1,5 @@
 --[[
-    CAC ULTIMATE SUITE - V4.4 (DISCORD FILE DELIVERY FIX)
+    CAC ULTIMATE SUITE - V4.5 (MAXIMIZE AUTO-REJOIN)
     Feature: Files > 9.5MB are saved locally to 'ROOT/dumps'.
     Engine: Hybrid R6/R15 + Heavy Duty Logic + 100MB Fix + Premium UI.
     Language: English Only.
@@ -61,7 +61,8 @@ local function gethwid()
     end
 end
 
-local saveinstance = saveinstance or function() warn("SaveInstance not supported") end
+local raw_saveinstance = saveinstance
+local saveinstance = raw_saveinstance or function() error("SaveInstance not supported", 0) end
 local listfiles = listfiles or function(...) return {} end
 local isfile = isfile or function(f) return false end
 local readfile = readfile or function(f) return "" end
@@ -70,6 +71,56 @@ local writefile = writefile or function(f, c) end
 local appendfile = appendfile or function(f, c) end
 local makefolder = makefolder or function(f) end
 local isfolder = isfolder or function(f) return false end
+
+local function DetectExecutorName()
+    local probes = {
+        function()
+            if identifyexecutor then
+                return identifyexecutor()
+            end
+        end,
+        function()
+            if getexecutorname then
+                return getexecutorname()
+            end
+        end,
+        function()
+            if getexecutor then
+                return getexecutor()
+            end
+        end
+    }
+
+    for _, probe in ipairs(probes) do
+        local ok, name = pcall(probe)
+        if ok and name and tostring(name) ~= "" then
+            return tostring(name)
+        end
+    end
+
+    local hints = {
+        { "Wave", function() return wave or Wave end },
+        { "Xeno", function() return xeno or Xeno end },
+        { "Synapse", function() return syn end },
+        { "Fluxus", function() return fluxus end },
+        { "Krnl", function() return KRNL_LOADED or krnl end },
+        { "Codex", function() return Codex or codex end },
+        { "Potassium", function() return Potassium or potassium end },
+        { "Cosmic", function() return Cosmic or cosmic end },
+        { "Volt", function() return Volt or volt end }
+    }
+
+    for _, hint in ipairs(hints) do
+        local ok, value = pcall(hint[2])
+        if ok and value then
+            return hint[1]
+        end
+    end
+
+    return "Unknown"
+end
+
+local ExecutorName = DetectExecutorName()
 
 -- [DYNAMIC FOLDER DETECTION]
 local function DetectExecutorRoot()
@@ -80,6 +131,7 @@ end
 
 local DetectedRoot = DetectExecutorRoot()
 local AUTO_REJOIN_MODE = "public"
+local MAXIMIZE_REJOIN_SUCCESS_THRESHOLD = 5
 
 -- CONFIGURATION STATE
 local Globals = {
@@ -106,6 +158,7 @@ local Globals = {
     AutoCopyAutoPublishResults = true,
     AutoPublishNamePrefix = "CAC",
     AutoPublishWaitSeconds = 0.65,
+    MaximizeAutoRejoin = false,
     QueueFastResumeEnabled = true
 }
 
@@ -127,6 +180,7 @@ local LocalCache = {
     AutoCopyAutoPublishResults = true,
     AutoPublishNamePrefix = "CAC",
     AutoPublishWaitSeconds = 0.65,
+    MaximizeAutoRejoin = false,
     QueueFastResumeEnabled = true,
     SessionToken = "",
     SessionExpiresAtISO = nil,
@@ -181,6 +235,9 @@ pcall(function()
         if LocalCache.AutoPublishWaitSeconds == nil then
             LocalCache.AutoPublishWaitSeconds = 0.65
         end
+        if LocalCache.MaximizeAutoRejoin == nil then
+            LocalCache.MaximizeAutoRejoin = false
+        end
         if LocalCache.QueueFastResumeEnabled == nil then
             LocalCache.QueueFastResumeEnabled = true
         end
@@ -196,6 +253,7 @@ pcall(function()
         Globals.AutoCopyAutoPublishResults = LocalCache.AutoCopyAutoPublishResults == true
         Globals.AutoPublishNamePrefix = tostring(LocalCache.AutoPublishNamePrefix)
         Globals.AutoPublishWaitSeconds = tonumber(LocalCache.AutoPublishWaitSeconds) or 0.65
+        Globals.MaximizeAutoRejoin = LocalCache.MaximizeAutoRejoin == true
         Globals.QueueFastResumeEnabled = LocalCache.QueueFastResumeEnabled ~= false
     end
 end)
@@ -211,6 +269,7 @@ local function SaveLocalCache()
     LocalCache.AutoCopyAutoPublishResults = Globals.AutoCopyAutoPublishResults == true
     LocalCache.AutoPublishNamePrefix = tostring(Globals.AutoPublishNamePrefix or "CAC")
     LocalCache.AutoPublishWaitSeconds = tonumber(Globals.AutoPublishWaitSeconds) or 0.65
+    LocalCache.MaximizeAutoRejoin = Globals.MaximizeAutoRejoin == true
     LocalCache.QueueFastResumeEnabled = Globals.QueueFastResumeEnabled ~= false
 
     pcall(function()
@@ -535,13 +594,14 @@ local function ConfirmQueueAutoRejoin(queueState, kind, index, statusLabel)
     return true
 end
 
-local function AttemptAutoRejoin(reason, modeOverride)
+local function AttemptAutoRejoin(reason, modeOverride, instant)
     local mode = tostring(modeOverride or AUTO_REJOIN_MODE)
     if mode ~= "public" and mode ~= "same" then
         mode = AUTO_REJOIN_MODE
     end
-    Notify("Auto Rejoin", "Cooldown detected. Rejoining in 3s (" .. mode .. ")...")
-    task.delay(3.0, function()
+    local delaySeconds = instant and 0 or 3.0
+    Notify("Auto Rejoin", instant and ("Rejoining now (" .. mode .. ")...") or ("Cooldown detected. Rejoining in 3s (" .. mode .. ")..."))
+    task.delay(delaySeconds, function()
         local latestQueue = ReadQueueState()
         if type(latestQueue) == "table" and latestQueue.auto_rejoin_cancelled == true then
             Notify("Auto Rejoin", "Cancelled. Queue remains saved.")
@@ -1044,7 +1104,7 @@ local function ValidateKey(inputKey, forceSwitch)
         key = cleanKey,
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.4"
+        client_version = "cacultimate-v4.5"
     })
 
     if not ok then
@@ -1114,7 +1174,7 @@ local function TryAutoLogin(force)
     local ok, data = ApiPost(AuthLogic.SessionAutoStartRoute, {
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.4"
+        client_version = "cacultimate-v4.5"
     })
 
     if ok and data and data.ok then
@@ -1473,6 +1533,136 @@ local function WaitForFile(path, timeoutSeconds)
     return okRead, detected
 end
 
+local SAVEINSTANCE_PROFILES = {
+    default = {
+        "object_filename",
+        "object_FilePath",
+        "object_Filename",
+        "instance_filename",
+        "positional_instance_filename"
+    },
+    xeno = {
+        "object_filename",
+        "object_FilePath",
+        "instance_filename",
+        "positional_instance_filename"
+    },
+    wave = {
+        "object_filename",
+        "instance_filename",
+        "object_Filename",
+        "object_FilePath",
+        "positional_instance_filename"
+    },
+    volt = {
+        "object_filename",
+        "object_FilePath",
+        "instance_filename",
+        "positional_instance_filename"
+    },
+    potassium = {
+        "object_filename",
+        "instance_filename",
+        "object_FilePath",
+        "positional_instance_filename"
+    },
+    cosmic = {
+        "object_filename",
+        "object_Filename",
+        "instance_filename",
+        "positional_instance_filename"
+    }
+}
+
+local function GetSaveInstanceProfile()
+    local key = string.lower(tostring(ExecutorName or ""))
+    for name, profile in pairs(SAVEINSTANCE_PROFILES) do
+        if name ~= "default" and string.find(key, name, 1, true) then
+            return profile, name
+        end
+    end
+    return SAVEINSTANCE_PROFILES.default, "default"
+end
+
+local function RunSaveInstanceAttempt(kind, object, filename)
+    if kind == "object_filename" then
+        return saveinstance({
+            Object = object,
+            filename = filename,
+            mode = "optimized",
+            SafeMode = false
+        })
+    elseif kind == "object_FilePath" then
+        return saveinstance({
+            Object = object,
+            FilePath = filename,
+            mode = "optimized",
+            SafeMode = false
+        })
+    elseif kind == "object_Filename" then
+        return saveinstance({
+            Object = object,
+            Filename = filename,
+            mode = "optimized",
+            SafeMode = false
+        })
+    elseif kind == "instance_filename" then
+        return saveinstance({
+            Instance = object,
+            filename = filename,
+            mode = "optimized",
+            SafeMode = false
+        })
+    elseif kind == "positional_instance_filename" then
+        return saveinstance(object, filename)
+    end
+    error("Unknown saveinstance attempt: " .. tostring(kind), 0)
+end
+
+local function SaveInstanceCompat(object, filename, statusLabel)
+    local profile, profileName = GetSaveInstanceProfile()
+    local attempted = {}
+    local lastError = nil
+
+    for _, kind in ipairs(profile) do
+        if not attempted[kind] then
+            attempted[kind] = true
+            if statusLabel then
+                statusLabel.Text = "Status: Writing file via saveinstance (" .. profileName .. "/" .. kind .. ")..."
+            end
+
+            local ok, err = pcall(function()
+                RunSaveInstanceAttempt(kind, object, filename)
+            end)
+
+            if ok then
+                return true, nil, kind, profileName
+            end
+
+            lastError = err
+            warn("[CAC] SaveInstance attempt failed (" .. tostring(profileName) .. "/" .. tostring(kind) .. "): " .. tostring(err))
+        end
+    end
+
+    for _, kind in ipairs(SAVEINSTANCE_PROFILES.default) do
+        if not attempted[kind] then
+            attempted[kind] = true
+            local ok, err = pcall(function()
+                RunSaveInstanceAttempt(kind, object, filename)
+            end)
+
+            if ok then
+                return true, nil, kind, "default"
+            end
+
+            lastError = err
+            warn("[CAC] SaveInstance fallback failed (" .. tostring(kind) .. "): " .. tostring(err))
+        end
+    end
+
+    return false, lastError or "SaveInstance failed.", nil, profileName
+end
+
 local function FindExportFallback(targetPath)
     if not listfiles then return nil end
 
@@ -1530,7 +1720,7 @@ local function UploadToDiscord(realFilename, fileContent, count, tag)
             title = "📦 Dump Success: " .. tag,
             description = "Rigs: **" .. count .. "**\nFile: `" .. finalName .. "`",
             color = 65280,
-            footer = { text = "CAC Ultimate V4.4" }
+            footer = { text = "CAC Ultimate V4.5" }
         }}
     }) .. "\r\n"
 
@@ -1587,7 +1777,7 @@ local function UploadTextToDiscord(realFilename, fileContent, tag, summary)
             title = "CAC " .. safeTag,
             description = tostring(summary or ("Generated file: `" .. finalName .. "`")),
             color = 65280,
-            footer = { text = "CAC Ultimate V4.4" }
+            footer = { text = "CAC Ultimate V4.5" }
         }}
     }) .. "\r\n"
 
@@ -1872,14 +2062,7 @@ function Factory.ProcessAndSave(outfits, tag, statusLabel)
     local filename = Globals.WorkFolder .. "/Dump_" .. os.time() .. "_" .. math.random(1000,9999) .. ".rbxm"
     export.Parent = nil 
     
-    local s, e = pcall(function()
-        saveinstance({
-            Object = export,
-            filename = filename,
-            mode = "optimized",
-            SafeMode = false
-        })
-    end)
+    local s, e, saveKind, saveProfile = SaveInstanceCompat(export, filename, statusLabel)
 
     export:Destroy()
 
@@ -1889,6 +2072,8 @@ function Factory.ProcessAndSave(outfits, tag, statusLabel)
         if statusLabel then
             statusLabel.Text = "Status: Save delayed, checking file on disk..."
         end
+    else
+        warn("[CAC] SaveInstance dispatched via " .. tostring(saveProfile) .. "/" .. tostring(saveKind) .. " on " .. tostring(ExecutorName))
     end
 
     local waitTime = math.clamp(math.floor((#outfits / 35)) + 10, 10, 75)
@@ -1904,26 +2089,61 @@ end
 -- DUMPERS (PERSISTENT LOGIC)
 -- ==================================================================
 local Dumpers = {}
-local Remote = ReplicatedStorage:FindFirstChild("CommunityOutfitsRemote") 
-    or ReplicatedStorage:WaitForChild("CommunityOutfitsRemote", 5)
+local Remote = ReplicatedStorage:FindFirstChild("CommunityOutfitsRemote")
 
 local SerializationModule = nil
-for _, v in pairs(ReplicatedStorage:GetDescendants()) do
-    if v.Name == "OutfitSerializationFunctions" and v:IsA("ModuleScript") then
-        local okModule, moduleValue = pcall(function()
-            return require(v)
-        end)
-        if okModule and moduleValue then
-            SerializationModule = moduleValue
+
+local function ResolveCommunityOutfitsRemote(timeoutSeconds)
+    if Remote then
+        return Remote
+    end
+
+    local deadline = os.clock() + (tonumber(timeoutSeconds) or 0)
+    repeat
+        Remote = ReplicatedStorage:FindFirstChild("CommunityOutfitsRemote")
+        if Remote then
+            return Remote
+        end
+        if os.clock() >= deadline then
             break
         end
+        task.wait(0.05)
+    until IsCancelled()
+
+    return Remote
+end
+
+local function ResolveSerializationModule(timeoutSeconds)
+    if SerializationModule then
+        return SerializationModule
     end
+
+    local deadline = os.clock() + (tonumber(timeoutSeconds) or 0)
+    repeat
+        local moduleScript = ReplicatedStorage:FindFirstChild("OutfitSerializationFunctions", true)
+        if moduleScript and moduleScript:IsA("ModuleScript") then
+            local okModule, moduleValue = pcall(function()
+                return require(moduleScript)
+            end)
+            if okModule and moduleValue then
+                SerializationModule = moduleValue
+                return SerializationModule
+            end
+        end
+        if os.clock() >= deadline then
+            break
+        end
+        task.wait(0.05)
+    until IsCancelled()
+
+    return SerializationModule
 end
 
 local function WarmupCommunityOutfits()
-    if not Remote or not LocalPlayer then return end
+    local remote = ResolveCommunityOutfitsRemote(2)
+    if not remote or not LocalPlayer then return end
     pcall(function()
-        Remote:InvokeServer({
+        remote:InvokeServer({
             Action = "GetCommunityOutfits",
             Creator = LocalPlayer.UserId,
             BatchNumber = 1,
@@ -1954,10 +2174,11 @@ local function HasActiveQueueResume()
 end
 
 local function BuildDescriptionFromItems(items)
-    if not items or not SerializationModule then return nil end
+    local serialization = ResolveSerializationModule(2)
+    if not items or not serialization then return nil end
     local desc = nil
     pcall(function()
-        desc = SerializationModule:CreateHumanDescFromPropertyValues(items)
+        desc = serialization:CreateHumanDescFromPropertyValues(items)
     end)
     return desc
 end
@@ -2781,12 +3002,23 @@ local function BuildCollectedFromCodeRecords(records)
 end
 
 local function RunCodeQueueState(queueState, statusLabel)
+    if not ResolveCommunityOutfitsRemote(6) then
+        return Notify("Error", "CommunityOutfitsRemote was not found.")
+    end
+    if not ResolveSerializationModule(6) then
+        return Notify("Error", "OutfitSerializationFunctions module was not found.")
+    end
+
     local codes = queueState.codes or {}
     local records = queueState.records or {}
     local nextIndex = tonumber(queueState.next_index) or 1
     local cooldownCount = tonumber(queueState.cooldown_count) or 0
     local processedCount = tonumber(queueState.processed_count) or #records
     local adaptiveDelay = tonumber(queueState.adaptive_delay) or 0.5
+    local successSinceRejoin = tonumber(queueState.success_since_rejoin) or 0
+    local codeAutoRejoinEnabled = queueState.auto_rejoin_enabled == true or Globals.AutoRejoinCodeEnabled == true
+    local codeAutoRejoinMode = tostring(queueState.auto_rejoin_mode or Globals.AutoRejoinCodeMode or AUTO_REJOIN_MODE)
+    local maximizeAutoRejoin = queueState.maximize_auto_rejoin == true or Globals.MaximizeAutoRejoin == true
 
     local minDelay = 0.25
     local maxDelay = 2.2
@@ -2805,6 +3037,7 @@ local function RunCodeQueueState(queueState, statusLabel)
         queueState.cooldown_count = cooldownCount
         queueState.processed_count = processedCount
         queueState.adaptive_delay = adaptiveDelay
+        queueState.success_since_rejoin = successSinceRejoin
         queueState.records = records
         WriteQueueState(queueState)
 
@@ -2832,12 +3065,15 @@ local function RunCodeQueueState(queueState, statusLabel)
                     cooldownCount = cooldownCount + 1
                     adaptiveDelay = math.min(maxDelay, adaptiveDelay * 1.25)
 
-                    if Globals.AutoRejoinCodeEnabled then
+                    if codeAutoRejoinEnabled then
                         queueState.next_index = i
                         queueState.cooldown_count = cooldownCount
                         queueState.processed_count = processedCount
                         queueState.adaptive_delay = adaptiveDelay
+                        queueState.success_since_rejoin = 0
                         queueState.records = records
+                        queueState.auto_rejoin_enabled = true
+                        queueState.auto_rejoin_mode = codeAutoRejoinMode
                         WriteQueueState(queueState)
                         if statusLabel then
                             statusLabel.Text = "Status: Cooldown hit. Saving queue and rejoining..."
@@ -2845,7 +3081,7 @@ local function RunCodeQueueState(queueState, statusLabel)
                         if not ConfirmQueueAutoRejoin(queueState, "code_extract", i, statusLabel) then
                             return "paused"
                         end
-                        AttemptAutoRejoin("Code queue paused at index " .. tostring(i), Globals.AutoRejoinCodeMode)
+                        AttemptAutoRejoin("Code queue paused at index " .. tostring(i), codeAutoRejoinMode)
                         return "rejoin"
                     end
 
@@ -2861,6 +3097,7 @@ local function RunCodeQueueState(queueState, statusLabel)
                         Items = response.Items
                     })
                     processedCount = processedCount + 1
+                    successSinceRejoin = successSinceRejoin + 1
                     adaptiveDelay = math.max(minDelay, adaptiveDelay * 0.9)
                     queueState.last_rejoin_key = nil
                     queueState.rejoin_loop_count = 0
@@ -2881,6 +3118,7 @@ local function RunCodeQueueState(queueState, statusLabel)
         queueState.cooldown_count = cooldownCount
         queueState.processed_count = processedCount
         queueState.adaptive_delay = adaptiveDelay
+        queueState.success_since_rejoin = successSinceRejoin
         queueState.records = records
         WriteQueueState(queueState)
 
@@ -2890,6 +3128,21 @@ local function RunCodeQueueState(queueState, statusLabel)
 
         if IsCancelled() then
             break
+        end
+        if processed and maximizeAutoRejoin and successSinceRejoin >= MAXIMIZE_REJOIN_SUCCESS_THRESHOLD and i < #codes then
+            queueState.next_index = i + 1
+            queueState.cooldown_count = cooldownCount
+            queueState.processed_count = processedCount
+            queueState.adaptive_delay = adaptiveDelay
+            queueState.success_since_rejoin = 0
+            queueState.records = records
+            queueState.maximize_auto_rejoin = true
+            WriteQueueState(queueState)
+            if statusLabel then
+                statusLabel.Text = "Status: Maximize Auto-Rejoin triggered after 5 successes. Rejoining now..."
+            end
+            AttemptAutoRejoin("Maximize auto-rejoin triggered after 5 code successes.", codeAutoRejoinMode, true)
+            return "rejoin"
         end
         task.wait(adaptiveDelay + (math.random() * 0.08))
     end
@@ -2920,10 +3173,10 @@ function Dumpers.ResumeCodeQueue(statusLabel)
 end
 
 function Dumpers.CodeList(rawText, statusLabel)
-    if not Remote then
+    if not ResolveCommunityOutfitsRemote(5) then
         return Notify("Error", "CommunityOutfitsRemote was not found.")
     end
-    if not SerializationModule then
+    if not ResolveSerializationModule(5) then
         return Notify("Error", "OutfitSerializationFunctions module was not found.")
     end
 
@@ -2942,6 +3195,10 @@ function Dumpers.CodeList(rawText, statusLabel)
         cooldown_count = 0,
         processed_count = 0,
         adaptive_delay = 0.5,
+        success_since_rejoin = 0,
+        auto_rejoin_enabled = Globals.AutoRejoinCodeEnabled == true,
+        auto_rejoin_mode = tostring(Globals.AutoRejoinCodeMode or AUTO_REJOIN_MODE),
+        maximize_auto_rejoin = Globals.MaximizeAutoRejoin == true,
         auto_rejoin_confirmed = false,
         auto_rejoin_cancelled = false,
         rejoin_loop_count = 0
@@ -2952,10 +3209,10 @@ function Dumpers.CodeList(rawText, statusLabel)
 end
 
 function Dumpers.Creator(username, statusLabel)
-    if not Remote then
+    if not ResolveCommunityOutfitsRemote(5) then
         return Notify("Error", "CommunityOutfitsRemote was not found.")
     end
-    if not SerializationModule then
+    if not ResolveSerializationModule(5) then
         return Notify("Error", "OutfitSerializationFunctions module was not found.")
     end
 
@@ -4593,7 +4850,7 @@ local function EquipSavedOutfitForPublish(item, statusLabel)
         return false, "Failed to equip saved outfit before publish."
     end
 
-    task.wait(0.85)
+    task.wait(Globals.MaximizeAutoRejoin and 0.45 or 0.65)
     return true, nil, obj, payload, equipResult
 end
 
@@ -4801,9 +5058,11 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
     local results = queueState.results or {}
     local nextIndex = tonumber(queueState.next_index) or 1
     local waitSeconds = tonumber(queueState.wait_seconds) or 0.65
-    waitSeconds = math.clamp(waitSeconds, 0.15, 4)
+    waitSeconds = math.clamp(waitSeconds, 0.05, 4)
+    local successSinceRejoin = tonumber(queueState.success_since_rejoin) or 0
     local autoRejoinEnabled = queueState.auto_rejoin_enabled == true or Globals.AutoRejoinPublishEnabled == true
     local autoRejoinMode = tostring(queueState.auto_rejoin_mode or Globals.AutoRejoinPublishMode or AUTO_REJOIN_MODE)
+    local maximizeAutoRejoin = queueState.maximize_auto_rejoin == true or Globals.MaximizeAutoRejoin == true
     local knownCodesByOutfitId = {}
 
     for _, row in ipairs(results) do
@@ -4822,6 +5081,7 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
         local item = items[i]
         queueState.next_index = i
         queueState.results = results
+        queueState.success_since_rejoin = successSinceRejoin
         WriteQueueState(queueState)
 
         local displayName = tostring(item.name or ("Outfit_" .. tostring(i)))
@@ -4859,6 +5119,7 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
             if autoRejoinEnabled and (not cooldownWait or cooldownWait > 3) then
                 queueState.next_index = i
                 queueState.results = results
+                queueState.success_since_rejoin = 0
                 queueState.auto_rejoin_enabled = true
                 queueState.auto_rejoin_mode = autoRejoinMode
                 WriteQueueState(queueState)
@@ -4899,6 +5160,9 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
             else
                 SaveAutoPublishResultLog(string.format("[%d] %s | id=%s | code=%s", i, row.outfit_name, row.used_id, row.code))
             end
+            if sourceKind ~= "existing" then
+                successSinceRejoin = successSinceRejoin + 1
+            end
         else
             table.insert(results, {
                 index = i,
@@ -4910,10 +5174,23 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
 
         queueState.next_index = i + 1
         queueState.results = results
+        queueState.success_since_rejoin = successSinceRejoin
         WriteQueueState(queueState)
 
         if IsCancelled() then
             break
+        end
+        if generatedCode and maximizeAutoRejoin and successSinceRejoin >= MAXIMIZE_REJOIN_SUCCESS_THRESHOLD and i < #items then
+            queueState.next_index = i + 1
+            queueState.results = results
+            queueState.success_since_rejoin = 0
+            queueState.maximize_auto_rejoin = true
+            WriteQueueState(queueState)
+            if statusLabel then
+                statusLabel.Text = "Status: Maximize Auto-Rejoin triggered after 5 publish successes. Rejoining now..."
+            end
+            AttemptAutoRejoin("Maximize auto-rejoin triggered after 5 auto publish successes.", autoRejoinMode, true)
+            return "rejoin"
         end
         task.wait(waitSeconds)
     end
@@ -5033,6 +5310,8 @@ function Dumpers.AutoPublish(sourceMode, folderInput, statusLabel, namePrefix)
         auto_rejoin_cancelled = false,
         auto_rejoin_enabled = Globals.AutoRejoinPublishEnabled == true,
         auto_rejoin_mode = tostring(Globals.AutoRejoinPublishMode or AUTO_REJOIN_MODE),
+        maximize_auto_rejoin = Globals.MaximizeAutoRejoin == true,
+        success_since_rejoin = 0,
         rejoin_loop_count = 0
     }
 
@@ -5092,8 +5371,8 @@ local function ApplyUIPostBuildPatches()
     for _, obj in ipairs(playerGui:GetDescendants()) do
         if obj:IsA("TextLabel") then
             local txt = tostring(obj.Text or "")
-            if txt:find("CAC Ultimate", 1, true) and (txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
-                obj.Text = txt:gsub("v4%.3", "v4.4"):gsub("v3%.0", "v4.4")
+            if txt:find("CAC Ultimate", 1, true) and (txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
+                obj.Text = txt:gsub("v4%.3", "v4.5"):gsub("v4%.4", "v4.5"):gsub("v3%.0", "v4.5")
             end
 
             if txt == "PROCESS STATUS" then
@@ -5203,7 +5482,8 @@ function UnlockUI()
     })
 
     TabHome:CreateSection("Information")
-    TabHome:CreateLabel("v4.4 (Fixed file not being sent to discord.)")
+    TabHome:CreateLabel("v4.5 (Maximize Auto-Rejoin test build.)")
+    TabHome:CreateLabel("Executor: " .. tostring(ExecutorName))
     TabHome:CreateLabel("UI Library Source: " .. tostring(LibrarySource))
     TabHome:CreateLabel("Queue Save Path: " .. tostring(QueueStatePath))
 
@@ -5405,7 +5685,7 @@ function UnlockUI()
     TabAutoPublish:CreateLabel("turn on this if u want more speed to publish/extract code.")
     local waitSliderConfig = {}
     waitSliderConfig.Name = "Delay Between Publish Calls (sec)"
-    waitSliderConfig.Min = 15
+    waitSliderConfig.Min = 5
     waitSliderConfig.Max = 300
     waitSliderConfig.Default = math.floor((tonumber(Globals.AutoPublishWaitSeconds) or 0.65) * 100)
     waitSliderConfig.Callback = function(v)
@@ -5489,6 +5769,15 @@ function UnlockUI()
     TabSettings:CreateLabel("Required for automatic payload delivery.")
 
     TabSettings:CreateSection("Queue Resume")
+    TabSettings:CreateToggle({
+        Name = "Maximize Auto-Rejoin",
+        Default = Globals.MaximizeAutoRejoin == true,
+        Callback = function(v)
+            Globals.MaximizeAutoRejoin = v == true
+            SaveLocalCache()
+        end
+    })
+    TabSettings:CreateLabel("Rejoins instantly after every 5 successful queue operations. Only enable this if you know what you are doing.")
     TabSettings:CreateToggle({
         Name = "Fast Queue Resume After Rejoin",
         Default = Globals.QueueFastResumeEnabled ~= false,
@@ -5620,7 +5909,7 @@ LicenseTab:CreateLabel("Security note: license checks are handled server-side.")
 Window:FinishLoading()
 
 task.defer(function()
-    task.wait(PendingQueueResume and 0.05 or 0.5)
+    task.wait(PendingQueueResume and 0 or 0.25)
     if not TryFastQueueResumeFromCache() then
         TryAutoLogin(false)
     end

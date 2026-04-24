@@ -1,9 +1,8 @@
 # CAC Ultimate Script
 
-Main executor script source for CAC Ultimate.
+Test source for CAC Ultimate script builds.
 
-- `cacultimate.lua` is the full in-game suite loaded by the licensing backend.
-- `executor-loader.lua` is the small authenticated loader used in executor context.
+- `cacultimate.lua` is the full in-game suite used for test builds before promoting changes to production.
 
 Library dependency:
 
