@@ -1,5 +1,5 @@
 --[[
-    CAC ULTIMATE SUITE - V4.5.1 (AUTO PUBLISH RESUME HOTFIX)
+    CAC ULTIMATE SUITE - V4.5.2 (AUTO PUBLISH DEBUG HOTFIX)
     Feature: Files > 9.5MB are saved locally to 'ROOT/dumps'.
     Engine: Hybrid R6/R15 + Heavy Duty Logic + 100MB Fix + Premium UI.
     Language: English Only.
@@ -406,6 +406,7 @@ end
 
 local QueueStatePath = Globals.QueueFolder .. "/CAC_TaskQueue.json"
 local QueueResultsPath = Globals.QueueFolder .. "/CAC_AutoPublish_Results.txt"
+local AutoPublishDebugPath = Globals.QueueFolder .. "/CAC_AutoPublish_Debug.jsonl"
 
 local function WriteQueueState(state)
     if type(state) ~= "table" then
@@ -473,6 +474,108 @@ local function ClearAutoPublishResultLog()
             delfile(QueueResultsPath)
         end
     end)
+end
+
+local function SanitizeForJson(value, depth)
+    depth = tonumber(depth) or 0
+    if depth > 4 then
+        return tostring(value)
+    end
+
+    local valueType = typeof(value)
+    if valueType == "nil" or valueType == "boolean" or valueType == "number" or valueType == "string" then
+        return value
+    end
+    if valueType == "Instance" then
+        local path = nil
+        pcall(function()
+            path = value:GetFullName()
+        end)
+        return {
+            __type = "Instance",
+            class = value.ClassName,
+            name = value.Name,
+            path = path
+        }
+    end
+    if valueType == "EnumItem" then
+        return tostring(value)
+    end
+    if type(value) == "table" then
+        local out = {}
+        local count = 0
+        for k, v in pairs(value) do
+            count = count + 1
+            if count > 80 then
+                out.__truncated = true
+                break
+            end
+            out[tostring(k)] = SanitizeForJson(v, depth + 1)
+        end
+        return out
+    end
+    return tostring(value)
+end
+
+local function AutoPublishDebug(eventName, data)
+    local payload = {
+        t = os.clock(),
+        unix = os.time(),
+        event = tostring(eventName or "event"),
+        place_id = game.PlaceId,
+        job_id = tostring(game.JobId or ""),
+        executor = tostring(ExecutorName or "Unknown"),
+        data = SanitizeForJson(data or {}, 0)
+    }
+
+    local okJson, encoded = pcall(function()
+        return HttpService:JSONEncode(payload)
+    end)
+    if not okJson or type(encoded) ~= "string" then
+        encoded = "{\"event\":\"encode_failed\"}"
+    end
+
+    local line = encoded .. "\n"
+    local okAppend = pcall(function()
+        appendfile(AutoPublishDebugPath, line)
+    end)
+    if not okAppend then
+        local existing = ""
+        local has, raw = SafeReadText(AutoPublishDebugPath)
+        if has and type(raw) == "string" then
+            existing = raw
+        end
+        SafeWriteText(AutoPublishDebugPath, existing .. line)
+    end
+end
+
+local function ClearAutoPublishDebugLog()
+    pcall(function()
+        if isfile(AutoPublishDebugPath) then
+            delfile(AutoPublishDebugPath)
+        end
+    end)
+end
+
+local function ExportAutoPublishDebugDump(statusLabel)
+    local okRead, raw = SafeReadText(AutoPublishDebugPath)
+    if not okRead or type(raw) ~= "string" or raw == "" then
+        Notify("Auto Publish Debug", "No debug dump found yet.")
+        return false
+    end
+
+    local outputPath = Globals.WorkFolder .. "/AutoPublishDebug_" .. os.date("%Y-%m-%d_%H-%M-%S") .. ".jsonl"
+    local okWrite, savedPath = SafeWriteText(outputPath, raw)
+    if okWrite then
+        if statusLabel then
+            statusLabel.Text = "Status: Auto publish debug dump saved to " .. tostring(savedPath or outputPath)
+        end
+        Notify("Auto Publish Debug", "Dump saved: " .. tostring(savedPath or outputPath))
+        return true
+    end
+
+    Notify("Auto Publish Debug", "Failed to write debug dump.")
+    return false
 end
 
 HideAutoRejoinActionBar = function()
@@ -1104,7 +1207,7 @@ local function ValidateKey(inputKey, forceSwitch)
         key = cleanKey,
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.1"
+        client_version = "cacultimate-v4.5.2"
     })
 
     if not ok then
@@ -1174,7 +1277,7 @@ local function TryAutoLogin(force)
     local ok, data = ApiPost(AuthLogic.SessionAutoStartRoute, {
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.1"
+        client_version = "cacultimate-v4.5.2"
     })
 
     if ok and data and data.ok then
@@ -1557,7 +1660,6 @@ local SAVEINSTANCE_PROFILES = {
     volt = {
         "object_filename",
         "object_FilePath",
-        "instance_filename",
         "positional_instance_filename"
     },
     potassium = {
@@ -1619,13 +1721,21 @@ local function RunSaveInstanceAttempt(kind, object, filename)
     error("Unknown saveinstance attempt: " .. tostring(kind), 0)
 end
 
+local function ShouldSkipSaveInstanceAttempt(kind, profileName)
+    local profile = string.lower(tostring(profileName or ""))
+    if profile == "volt" and kind == "instance_filename" then
+        return true
+    end
+    return false
+end
+
 local function SaveInstanceCompat(object, filename, statusLabel)
     local profile, profileName = GetSaveInstanceProfile()
     local attempted = {}
     local lastError = nil
 
     for _, kind in ipairs(profile) do
-        if not attempted[kind] then
+        if not attempted[kind] and not ShouldSkipSaveInstanceAttempt(kind, profileName) then
             attempted[kind] = true
             if statusLabel then
                 statusLabel.Text = "Status: Writing file via saveinstance (" .. profileName .. "/" .. kind .. ")..."
@@ -1645,7 +1755,7 @@ local function SaveInstanceCompat(object, filename, statusLabel)
     end
 
     for _, kind in ipairs(SAVEINSTANCE_PROFILES.default) do
-        if not attempted[kind] then
+        if not attempted[kind] and not ShouldSkipSaveInstanceAttempt(kind, profileName) then
             attempted[kind] = true
             local ok, err = pcall(function()
                 RunSaveInstanceAttempt(kind, object, filename)
@@ -1720,7 +1830,7 @@ local function UploadToDiscord(realFilename, fileContent, count, tag)
             title = "📦 Dump Success: " .. tag,
             description = "Rigs: **" .. count .. "**\nFile: `" .. finalName .. "`",
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.1" }
+            footer = { text = "CAC Ultimate V4.5.2" }
         }}
     }) .. "\r\n"
 
@@ -1777,7 +1887,7 @@ local function UploadTextToDiscord(realFilename, fileContent, tag, summary)
             title = "CAC " .. safeTag,
             description = tostring(summary or ("Generated file: `" .. finalName .. "`")),
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.1" }
+            footer = { text = "CAC Ultimate V4.5.2" }
         }}
     }) .. "\r\n"
 
@@ -3012,6 +3122,13 @@ local function RunCodeQueueState(queueState, statusLabel)
     local codeAutoRejoinEnabled = queueState.auto_rejoin_enabled == true or Globals.AutoRejoinCodeEnabled == true
     local codeAutoRejoinMode = tostring(queueState.auto_rejoin_mode or Globals.AutoRejoinCodeMode or AUTO_REJOIN_MODE)
     local maximizeAutoRejoin = queueState.maximize_auto_rejoin == true or Globals.MaximizeAutoRejoin == true
+    local currentJobId = tostring(game.JobId or "")
+    if tostring(queueState.last_job_id or "") ~= currentJobId then
+        successSinceRejoin = 0
+        queueState.success_since_rejoin = 0
+        queueState.last_job_id = currentJobId
+        WriteQueueState(queueState)
+    end
 
     local minDelay = 0.25
     local maxDelay = 2.2
@@ -3028,8 +3145,6 @@ local function RunCodeQueueState(queueState, statusLabel)
     if not ResolveSerializationModule(3) then
         return Notify("Error", "OutfitSerializationFunctions module was not found.")
     end
-
-    task.spawn(WarmupCommunityOutfits)
 
     for i = nextIndex, #codes do
         if IsCancelled() then
@@ -4736,12 +4851,20 @@ local function GenerateCodeForOutfitId(outfitId)
 
     local lastError = "RequestFailed"
     for _, candidate in ipairs(candidateIds) do
+        AutoPublishDebug("generate_code_request", {
+            outfit_id = tostring(candidate)
+        })
         local ok, result = pcall(function()
             return Remote:InvokeServer({
                 Action = "GenerateOutfitCode",
                 OutfitId = candidate
             })
         end)
+        AutoPublishDebug("generate_code_response", {
+            outfit_id = tostring(candidate),
+            ok = ok,
+            result = result
+        })
         if ok then
             if result == "OnCooldown" then
                 return nil, "OnCooldown", candidate
@@ -4857,6 +4980,13 @@ local function EquipSavedOutfitForPublish(item, statusLabel)
     end
 
     local rigType = ResolveRigTypeValue((payload and payload.RigType) or item.rig_type)
+    AutoPublishDebug("equip_saved_outfit_request", {
+        outfit_id = outfitId,
+        outfit_name = item and item.name,
+        rig_type = tostring(rigType),
+        has_live_object = obj ~= nil,
+        has_properties = type(properties) == "table"
+    })
     local okEquip, equipResult = pcall(function()
         return catalogRemote:InvokeServer({
             Action = "CreateAndWearHumanoidDescription",
@@ -4864,9 +4994,33 @@ local function EquipSavedOutfitForPublish(item, statusLabel)
             RigType = rigType
         })
     end)
+    AutoPublishDebug("equip_saved_outfit_response", {
+        outfit_id = outfitId,
+        ok = okEquip,
+        result = equipResult
+    })
 
     if not okEquip then
         return false, "Failed to equip saved outfit before publish."
+    end
+
+    if obj then
+        local wornEvent = ReplicatedStorage:FindFirstChild("Events")
+            and ReplicatedStorage.Events:FindFirstChild("OnSavedOutfitWorn")
+        if wornEvent and wornEvent.FireServer then
+            local okWorn, wornErr = pcall(function()
+                wornEvent:FireServer(obj)
+            end)
+            AutoPublishDebug("on_saved_outfit_worn_fire", {
+                outfit_id = outfitId,
+                ok = okWorn,
+                error = wornErr
+            })
+        else
+            AutoPublishDebug("on_saved_outfit_worn_missing", {
+                outfit_id = outfitId
+            })
+        end
     end
 
     task.wait(Globals.MaximizeAutoRejoin and 0.45 or 0.65)
@@ -4889,12 +5043,20 @@ local function PublishCurrentOutfitForCode(outfitName)
         cleanName = string.sub(cleanName, 1, 40)
     end
 
+    AutoPublishDebug("publish_request", {
+        outfit_name = cleanName
+    })
     local okPublish, result = pcall(function()
         return Remote:InvokeServer({
             Action = "PublishMyOutfit",
             OutfitName = cleanName
         })
     end)
+    AutoPublishDebug("publish_response", {
+        outfit_name = cleanName,
+        ok = okPublish,
+        result = result
+    })
 
     if not okPublish then
         return nil, "Publish request failed."
@@ -5127,7 +5289,21 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
     local autoRejoinEnabled = queueState.auto_rejoin_enabled == true or Globals.AutoRejoinPublishEnabled == true
     local autoRejoinMode = tostring(queueState.auto_rejoin_mode or Globals.AutoRejoinPublishMode or AUTO_REJOIN_MODE)
     local maximizeAutoRejoin = queueState.maximize_auto_rejoin == true or Globals.MaximizeAutoRejoin == true
+    local currentJobId = tostring(game.JobId or "")
+    if tostring(queueState.last_job_id or "") ~= currentJobId then
+        successSinceRejoin = 0
+        queueState.success_since_rejoin = 0
+        queueState.last_job_id = currentJobId
+        WriteQueueState(queueState)
+    end
     local knownCodesByOutfitId = {}
+    AutoPublishDebug("queue_run_start", {
+        total_items = #items,
+        next_index = nextIndex,
+        results = #results,
+        auto_rejoin_enabled = autoRejoinEnabled,
+        maximize_auto_rejoin = maximizeAutoRejoin
+    })
 
     for _, row in ipairs(results) do
         local code = NormalizePublishedCode(row and row.code or nil)
@@ -5149,6 +5325,13 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
         WriteQueueState(queueState)
 
         local displayName = tostring(item.name or ("Outfit_" .. tostring(i)))
+        AutoPublishDebug("queue_item_start", {
+            index = i,
+            name = displayName,
+            outfit_id = tostring(item.outfit_id or ""),
+            published_outfit_id = tostring(item.published_outfit_id or ""),
+            existing_code = tostring(item.existing_code or "")
+        })
         if statusLabel then
             statusLabel.Text = "Auto Publish: " .. i .. "/" .. #items .. " | " .. displayName
         end
@@ -5167,11 +5350,23 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
             generatedCode = existingKnownCode
             usedId = item.outfit_id
             sourceKind = "existing"
+            AutoPublishDebug("queue_item_existing_code", {
+                index = i,
+                code = tostring(generatedCode),
+                outfit_id = tostring(item.outfit_id or "")
+            })
         end
 
         if not generatedCode then
             generatedCode, genErr, usedId, sourceKind = PublishSavedOutfitAndGenerateCode(item, statusLabel)
         end
+        AutoPublishDebug("queue_item_result", {
+            index = i,
+            code = generatedCode,
+            error = genErr,
+            used_id = usedId,
+            source = sourceKind
+        })
         if usedId and tostring(usedId) ~= "" and (sourceKind == "published" or sourceKind == "published_id") then
             item.published_outfit_id = tostring(usedId)
             queueState.items = items
@@ -5192,6 +5387,12 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
                 queueState.auto_rejoin_enabled = true
                 queueState.auto_rejoin_mode = autoRejoinMode
                 WriteQueueState(queueState)
+                AutoPublishDebug("queue_cooldown_rejoin", {
+                    index = i,
+                    cooldown_wait = cooldownWait,
+                    used_id = usedId,
+                    source = sourceKind
+                })
                 if statusLabel then
                     statusLabel.Text = "Status: Publish/code cooldown detected (" .. tostring(cooldownWait or "?") .. "s). Saving queue and rejoining..."
                 end
@@ -5255,6 +5456,11 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
                 end
                 WriteQueueState(queueState)
                 if tonumber(queueState.rejoin_loop_count) and queueState.rejoin_loop_count > 2 then
+                    AutoPublishDebug("queue_partial_pause", {
+                        index = i,
+                        error = genErr,
+                        rejoin_loop_count = queueState.rejoin_loop_count
+                    })
                     if statusLabel then
                         statusLabel.Text = "Status: Auto publish paused at index " .. tostring(i) .. " after repeated partial retries. Queue saved."
                     end
@@ -5264,6 +5470,11 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
                 if statusLabel then
                     statusLabel.Text = "Status: Auto publish kept index " .. tostring(i) .. " pending after a partial result. Rejoining now..."
                 end
+                AutoPublishDebug("queue_partial_rejoin", {
+                    index = i,
+                    error = genErr,
+                    rejoin_loop_count = queueState.rejoin_loop_count
+                })
                 AttemptAutoRejoin("Auto publish preserved pending index " .. tostring(i) .. " after partial publish state.", autoRejoinMode, true)
                 return "rejoin"
             end
@@ -5289,6 +5500,10 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
             queueState.success_since_rejoin = 0
             queueState.maximize_auto_rejoin = true
             WriteQueueState(queueState)
+            AutoPublishDebug("queue_maximize_rejoin", {
+                index = i,
+                success_since_rejoin = successSinceRejoin
+            })
             if statusLabel then
                 statusLabel.Text = "Status: Maximize Auto-Rejoin triggered after 5 publish successes. Rejoining now..."
             end
@@ -5331,6 +5546,12 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
 
     local finalText = table.concat(lines, "\n")
     local okWrite = SafeWriteText(outputPath, finalText)
+    AutoPublishDebug("queue_finished", {
+        total_items = #items,
+        success_count = successCount,
+        output_path = outputPath,
+        wrote_result = okWrite
+    })
     if okWrite then
         Notify("Auto Publish", "Finished. Saved result to: " .. tostring(outputPath))
     else
@@ -5398,6 +5619,7 @@ function Dumpers.AutoPublish(sourceMode, folderInput, statusLabel, namePrefix)
     end
 
     ClearAutoPublishResultLog()
+    ClearAutoPublishDebugLog()
 
     local queueState = {
         version = 2,
@@ -5419,6 +5641,14 @@ function Dumpers.AutoPublish(sourceMode, folderInput, statusLabel, namePrefix)
     }
 
     WriteQueueState(queueState)
+    AutoPublishDebug("queue_created", {
+        total_items = #items,
+        source_mode = tostring(sourceMode or "Current Folder"),
+        folder_target = tostring(folderInput or ""),
+        wait_seconds = tonumber(Globals.AutoPublishWaitSeconds) or 0.65,
+        auto_rejoin_enabled = Globals.AutoRejoinPublishEnabled == true,
+        maximize_auto_rejoin = Globals.MaximizeAutoRejoin == true
+    })
     Notify("Auto Publish", "Queue created with " .. tostring(#items) .. " outfits.")
     RunAutoPublishQueueState(queueState, statusLabel)
 end
@@ -5426,7 +5656,12 @@ end
 function Dumpers.ClearSavedQueue()
     ClearQueueState()
     ClearAutoPublishResultLog()
+    ClearAutoPublishDebugLog()
     Notify("System", "Saved queue data cleared.")
+end
+
+function Dumpers.ExportAutoPublishDebug(statusLabel)
+    ExportAutoPublishDebugDump(statusLabel)
 end
 
 local function RunExtractionTask(taskName, statusLabel, runner)
@@ -5474,8 +5709,8 @@ local function ApplyUIPostBuildPatches()
     for _, obj in ipairs(playerGui:GetDescendants()) do
         if obj:IsA("TextLabel") then
             local txt = tostring(obj.Text or "")
-            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.1", 1, true) and (txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
-                obj.Text = txt:gsub("v4%.3", "v4.5.1"):gsub("v4%.4", "v4.5.1"):gsub("v4%.5", "v4.5.1"):gsub("v3%.0", "v4.5.1")
+            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.2", 1, true) and (txt:find("v4.5.1", 1, true) or txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
+                obj.Text = txt:gsub("v4%.3", "v4.5.2"):gsub("v4%.4", "v4.5.2"):gsub("v4%.5%.1", "v4.5.2"):gsub("v4%.5", "v4.5.2"):gsub("v3%.0", "v4.5.2")
             end
 
             if txt == "PROCESS STATUS" then
@@ -5600,7 +5835,7 @@ function UnlockUI()
     })
 
     TabHome:CreateSection("Information")
-    TabHome:CreateLabel("v4.5.1 (Auto publish resume hotfix.)")
+    TabHome:CreateLabel("v4.5.2 (Auto publish debug hotfix.)")
     TabHome:CreateLabel("Executor: " .. tostring(ExecutorName))
     TabHome:CreateLabel("UI Library Source: " .. tostring(LibrarySource))
     TabHome:CreateLabel("Queue Save Path: " .. tostring(QueueStatePath))
@@ -5866,6 +6101,12 @@ function UnlockUI()
                 return Notify("Info", "No result log found yet.")
             end
             CopyToClipboardOrNotify(raw, "Auto publish result log copied.")
+        end
+    })
+    TabAutoPublish:CreateButton({
+        Name = "Export Auto Publish Debug Dump",
+        Callback = function()
+            Dumpers.ExportAutoPublishDebug(ExtractorStatus)
         end
     })
 
