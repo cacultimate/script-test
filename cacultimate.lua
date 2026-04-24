@@ -1,5 +1,5 @@
 --[[
-    CAC ULTIMATE SUITE - V4.5.3 (NO SESSION KICK HOTFIX)
+    CAC ULTIMATE SUITE - V4.5.4 (AUTO REJOIN SERVER HOP HOTFIX)
     Feature: Files > 9.5MB are saved locally to 'ROOT/dumps'.
     Engine: Hybrid R6/R15 + Heavy Duty Logic + 100MB Fix + Premium UI.
     Language: English Only.
@@ -697,6 +697,98 @@ local function ConfirmQueueAutoRejoin(queueState, kind, index, statusLabel)
     return true
 end
 
+local TeleportFailureMonitorConnected = false
+
+local function EnsureTeleportFailureMonitor()
+    if TeleportFailureMonitorConnected then
+        return
+    end
+
+    TeleportFailureMonitorConnected = true
+    pcall(function()
+        TeleportService.TeleportInitFailed:Connect(function(player, teleportResult, errorMessage, placeId)
+            if player ~= LocalPlayer then
+                return
+            end
+            AutoPublishDebug("rejoin_teleport_failed", {
+                result = tostring(teleportResult),
+                error = tostring(errorMessage or ""),
+                place_id = tostring(placeId or game.PlaceId),
+                current_job_id = tostring(game.JobId or "")
+            })
+        end)
+    end)
+end
+
+local function FetchPublicServerJobId(excludedJobId)
+    if not http_request then
+        return nil, "Executor HTTP request is unavailable."
+    end
+
+    local excluded = tostring(excludedJobId or "")
+    local cursor = nil
+    local lastError = "No public server target found."
+
+    for _ = 1, 3 do
+        local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId) .. "/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true"
+        if cursor and tostring(cursor) ~= "" then
+            local okEncode, encoded = pcall(function()
+                return HttpService:UrlEncode(tostring(cursor))
+            end)
+            url = url .. "&cursor=" .. tostring(okEncode and encoded or cursor)
+        end
+
+        local okRequest, response = pcall(function()
+            return http_request({
+                Url = url,
+                Method = "GET",
+                Headers = { ["Accept"] = "application/json" }
+            })
+        end)
+
+        if not okRequest or not response then
+            lastError = "Public server request failed."
+            break
+        end
+
+        local statusCode = tonumber(response.StatusCode) or tonumber(response.Status) or 0
+        if statusCode < 200 or statusCode > 299 then
+            lastError = "Public server request returned HTTP " .. tostring(statusCode) .. "."
+            break
+        end
+
+        local okJson, payload = pcall(function()
+            return HttpService:JSONDecode(tostring(response.Body or ""))
+        end)
+
+        if not okJson or type(payload) ~= "table" or type(payload.data) ~= "table" then
+            lastError = "Public server response was invalid."
+            break
+        end
+
+        local candidates = {}
+        for _, server in ipairs(payload.data) do
+            local jobId = tostring(server and server.id or "")
+            local playing = tonumber(server and server.playing) or 0
+            local maxPlayers = tonumber(server and server.maxPlayers) or math.huge
+            if jobId ~= "" and jobId ~= excluded and playing < maxPlayers then
+                table.insert(candidates, jobId)
+            end
+        end
+
+        if #candidates > 0 then
+            return candidates[math.random(1, #candidates)], nil
+        end
+
+        cursor = payload.nextPageCursor
+        if not cursor or tostring(cursor) == "" then
+            break
+        end
+    end
+
+    return nil, lastError
+end
+
 local function AttemptAutoRejoin(reason, modeOverride, instant)
     local mode = tostring(modeOverride or AUTO_REJOIN_MODE)
     if mode ~= "public" and mode ~= "same" then
@@ -704,6 +796,7 @@ local function AttemptAutoRejoin(reason, modeOverride, instant)
     end
     local delaySeconds = instant and 0 or 3.0
     Notify("Auto Rejoin", instant and ("Rejoining now (" .. mode .. ")...") or ("Cooldown detected. Rejoining in 3s (" .. mode .. ")..."))
+    EnsureTeleportFailureMonitor()
     task.delay(delaySeconds, function()
         local latestQueue = ReadQueueState()
         if type(latestQueue) == "table" and latestQueue.auto_rejoin_cancelled == true then
@@ -712,8 +805,21 @@ local function AttemptAutoRejoin(reason, modeOverride, instant)
             return
         end
 
+        AutoPublishDebug("rejoin_attempt", {
+            reason = tostring(reason or ""),
+            mode = mode,
+            instant = instant == true,
+            current_job_id = tostring(game.JobId or "")
+        })
+
         local function tryCall(label, fn)
             local ok, err = pcall(fn)
+            AutoPublishDebug("rejoin_call_result", {
+                label = tostring(label),
+                ok = ok,
+                error = err and tostring(err) or nil,
+                current_job_id = tostring(game.JobId or "")
+            })
             if ok then
                 return true
             end
@@ -721,7 +827,40 @@ local function AttemptAutoRejoin(reason, modeOverride, instant)
             return false
         end
 
+        local function tryJobHop(jobId, label)
+            if not jobId or tostring(jobId) == "" then
+                return false
+            end
+
+            AutoPublishDebug("rejoin_target", {
+                mode = mode,
+                label = tostring(label or "job_hop"),
+                target_job_id = tostring(jobId),
+                current_job_id = tostring(game.JobId or "")
+            })
+
+            if tryCall(tostring(label or "job hop") .. " with player", function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, tostring(jobId), LocalPlayer)
+            end) then
+                return true
+            end
+
+            return tryCall(tostring(label or "job hop"), function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, tostring(jobId))
+            end)
+        end
+
         local function tryPublic()
+            local targetJobId, fetchErr = FetchPublicServerJobId(game.JobId)
+            if targetJobId and tryJobHop(targetJobId, "public server hop") then
+                return true
+            end
+
+            AutoPublishDebug("rejoin_no_public_target", {
+                error = tostring(fetchErr or "TeleportToPlaceInstance failed."),
+                current_job_id = tostring(game.JobId or "")
+            })
+
             if tryCall("Teleport(placeId)", function()
                 TeleportService:Teleport(game.PlaceId)
             end) then
@@ -1221,7 +1360,7 @@ local function ValidateKey(inputKey, forceSwitch)
         key = cleanKey,
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.3"
+        client_version = "cacultimate-v4.5.4"
     })
 
     if not ok then
@@ -1291,7 +1430,7 @@ local function TryAutoLogin(force)
     local ok, data = ApiPost(AuthLogic.SessionAutoStartRoute, {
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.3"
+        client_version = "cacultimate-v4.5.4"
     })
 
     if ok and data and data.ok then
@@ -1848,7 +1987,7 @@ local function UploadToDiscord(realFilename, fileContent, count, tag)
             title = "📦 Dump Success: " .. tag,
             description = "Rigs: **" .. count .. "**\nFile: `" .. finalName .. "`",
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.3" }
+            footer = { text = "CAC Ultimate V4.5.4" }
         }}
     }) .. "\r\n"
 
@@ -1905,7 +2044,7 @@ local function UploadTextToDiscord(realFilename, fileContent, tag, summary)
             title = "CAC " .. safeTag,
             description = tostring(summary or ("Generated file: `" .. finalName .. "`")),
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.3" }
+            footer = { text = "CAC Ultimate V4.5.4" }
         }}
     }) .. "\r\n"
 
@@ -5308,6 +5447,36 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
     local autoRejoinMode = tostring(queueState.auto_rejoin_mode or Globals.AutoRejoinPublishMode or AUTO_REJOIN_MODE)
     local maximizeAutoRejoin = queueState.maximize_auto_rejoin == true or Globals.MaximizeAutoRejoin == true
     local currentJobId = tostring(game.JobId or "")
+
+    if queueState.awaiting_job_change == true then
+        local rejoinFromJobId = tostring(queueState.last_rejoin_from_job_id or "")
+        local cooldownUntil = tonumber(queueState.cooldown_until)
+        if rejoinFromJobId ~= "" and rejoinFromJobId == currentJobId and cooldownUntil and cooldownUntil > os.time() then
+            local remaining = math.clamp(math.ceil(cooldownUntil - os.time()) + 1, 1, 75)
+            AutoPublishDebug("queue_same_job_after_rejoin_wait", {
+                current_job_id = currentJobId,
+                cooldown_until = cooldownUntil,
+                wait_seconds = remaining,
+                next_index = tonumber(queueState.next_index) or 1
+            })
+            if statusLabel then
+                statusLabel.Text = "Status: Rejoin stayed in the same server. Waiting " .. tostring(remaining) .. "s before retry..."
+            end
+            task.wait(remaining)
+        elseif rejoinFromJobId ~= "" and rejoinFromJobId ~= currentJobId then
+            AutoPublishDebug("queue_job_changed_after_rejoin", {
+                from_job_id = rejoinFromJobId,
+                current_job_id = currentJobId,
+                next_index = tonumber(queueState.next_index) or 1
+            })
+        end
+
+        queueState.awaiting_job_change = false
+        queueState.cooldown_until = nil
+        queueState.last_rejoin_from_job_id = nil
+        WriteQueueState(queueState)
+    end
+
     if tostring(queueState.last_job_id or "") ~= currentJobId then
         successSinceRejoin = 0
         queueState.success_since_rejoin = 0
@@ -5404,12 +5573,21 @@ local function RunAutoPublishQueueState(queueState, statusLabel)
                 queueState.success_since_rejoin = 0
                 queueState.auto_rejoin_enabled = true
                 queueState.auto_rejoin_mode = autoRejoinMode
+                queueState.awaiting_job_change = true
+                queueState.last_rejoin_from_job_id = currentJobId
+                queueState.last_cooldown_wait = cooldownWait
+                if cooldownWait then
+                    queueState.cooldown_until = os.time() + math.max(0, math.floor(cooldownWait))
+                else
+                    queueState.cooldown_until = nil
+                end
                 WriteQueueState(queueState)
                 AutoPublishDebug("queue_cooldown_rejoin", {
                     index = i,
                     cooldown_wait = cooldownWait,
                     used_id = usedId,
-                    source = sourceKind
+                    source = sourceKind,
+                    current_job_id = currentJobId
                 })
                 if statusLabel then
                     statusLabel.Text = "Status: Publish/code cooldown detected (" .. tostring(cooldownWait or "?") .. "s). Saving queue and rejoining..."
@@ -5727,8 +5905,8 @@ local function ApplyUIPostBuildPatches()
     for _, obj in ipairs(playerGui:GetDescendants()) do
         if obj:IsA("TextLabel") then
             local txt = tostring(obj.Text or "")
-            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.3", 1, true) and (txt:find("v4.5.2", 1, true) or txt:find("v4.5.1", 1, true) or txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
-                obj.Text = txt:gsub("v4%.3", "v4.5.3"):gsub("v4%.4", "v4.5.3"):gsub("v4%.5%.2", "v4.5.3"):gsub("v4%.5%.1", "v4.5.3"):gsub("v4%.5", "v4.5.3"):gsub("v3%.0", "v4.5.3")
+            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.4", 1, true) and (txt:find("v4.5.3", 1, true) or txt:find("v4.5.2", 1, true) or txt:find("v4.5.1", 1, true) or txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
+                obj.Text = txt:gsub("v4%.3", "v4.5.4"):gsub("v4%.4", "v4.5.4"):gsub("v4%.5%.3", "v4.5.4"):gsub("v4%.5%.2", "v4.5.4"):gsub("v4%.5%.1", "v4.5.4"):gsub("v4%.5", "v4.5.4"):gsub("v3%.0", "v4.5.4")
             end
 
             if txt == "PROCESS STATUS" then
@@ -5853,7 +6031,7 @@ function UnlockUI()
     })
 
     TabHome:CreateSection("Information")
-    TabHome:CreateLabel("v4.5.3 (No session kick hotfix.)")
+    TabHome:CreateLabel("v4.5.4 (Auto rejoin server hop hotfix.)")
     TabHome:CreateLabel("Executor: " .. tostring(ExecutorName))
     TabHome:CreateLabel("UI Library Source: " .. tostring(LibrarySource))
     TabHome:CreateLabel("Queue Save Path: " .. tostring(QueueStatePath))
