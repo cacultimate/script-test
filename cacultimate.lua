@@ -1,5 +1,5 @@
 --[[
-    CAC ULTIMATE SUITE - V4.5.2 (AUTO PUBLISH DEBUG HOTFIX)
+    CAC ULTIMATE SUITE - V4.5.3 (NO SESSION KICK HOTFIX)
     Feature: Files > 9.5MB are saved locally to 'ROOT/dumps'.
     Engine: Hybrid R6/R15 + Heavy Duty Logic + 100MB Fix + Premium UI.
     Language: English Only.
@@ -893,13 +893,24 @@ local function TimeRemainingText()
     return string.format("%d Min", math.max(1, math.floor(secondsLeft / 60)))
 end
 
+local function NormalizeSessionRecheckMessage(reason)
+    local message = tostring(reason or "")
+    local lower = message:lower()
+
+    if message == "" or lower:find("session", 1, true) or lower:find("token", 1, true) or lower:find("expired", 1, true) then
+        return "Session recheck failed. Login again when convenient."
+    end
+
+    return message
+end
+
 local function ValidateSessionNow(notifySuccess)
     if not Globals.IsAuthenticated then
         return false, "Not authenticated."
     end
 
     if Globals.SessionToken == "" then
-        return false, "Missing session token."
+        return false, NormalizeSessionRecheckMessage("Missing session token.")
     end
 
     local ok, data, err = ApiPost(AuthLogic.SessionValidateRoute, {
@@ -908,11 +919,11 @@ local function ValidateSessionNow(notifySuccess)
     })
 
     if not ok then
-        return false, err or "Session validation failed."
+        return false, NormalizeSessionRecheckMessage(err)
     end
 
     if not data or not data.ok or not data.data or data.data.valid ~= true then
-        return false, "Session invalid or expired."
+        return false, "Session recheck failed. Login again when convenient."
     end
 
     if data.data.revalidate_after_seconds then
@@ -1097,10 +1108,13 @@ end
 local function ForceAuthStop(reason)
     Globals.IsAuthenticated = false
     Globals.SessionToken = ""
-    Notify("Security Alert", reason)
-    task.wait(2)
-    LocalPlayer:Kick("Security: " .. reason)
-    while true do end
+    Globals.SessionExpiresAtISO = nil
+    LocalCache.SessionToken = ""
+    LocalCache.SessionExpiresAtISO = nil
+    SaveLocalCache()
+    local safeReason = NormalizeSessionRecheckMessage(reason)
+    Notify("Session Notice", safeReason)
+    warn("[CAC Auth] Session heartbeat stopped: " .. safeReason)
 end
 
 local function StartSessionHeartbeat()
@@ -1207,7 +1221,7 @@ local function ValidateKey(inputKey, forceSwitch)
         key = cleanKey,
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.2"
+        client_version = "cacultimate-v4.5.3"
     })
 
     if not ok then
@@ -1277,7 +1291,7 @@ local function TryAutoLogin(force)
     local ok, data = ApiPost(AuthLogic.SessionAutoStartRoute, {
         hwid = gethwid(),
         device_label = "roblox-client",
-        client_version = "cacultimate-v4.5.2"
+        client_version = "cacultimate-v4.5.3"
     })
 
     if ok and data and data.ok then
@@ -1358,7 +1372,11 @@ local function TryFastQueueResumeFromCache()
         if not okValidate then
             Globals.IsAuthenticated = false
             Globals.SessionToken = ""
-            Notify("Error", err or "Cached session expired. Login again.")
+            Globals.SessionExpiresAtISO = nil
+            LocalCache.SessionToken = ""
+            LocalCache.SessionExpiresAtISO = nil
+            SaveLocalCache()
+            Notify("Session Notice", NormalizeSessionRecheckMessage(err))
         end
     end)
 
@@ -1830,7 +1848,7 @@ local function UploadToDiscord(realFilename, fileContent, count, tag)
             title = "📦 Dump Success: " .. tag,
             description = "Rigs: **" .. count .. "**\nFile: `" .. finalName .. "`",
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.2" }
+            footer = { text = "CAC Ultimate V4.5.3" }
         }}
     }) .. "\r\n"
 
@@ -1887,7 +1905,7 @@ local function UploadTextToDiscord(realFilename, fileContent, tag, summary)
             title = "CAC " .. safeTag,
             description = tostring(summary or ("Generated file: `" .. finalName .. "`")),
             color = 65280,
-            footer = { text = "CAC Ultimate V4.5.2" }
+            footer = { text = "CAC Ultimate V4.5.3" }
         }}
     }) .. "\r\n"
 
@@ -5709,8 +5727,8 @@ local function ApplyUIPostBuildPatches()
     for _, obj in ipairs(playerGui:GetDescendants()) do
         if obj:IsA("TextLabel") then
             local txt = tostring(obj.Text or "")
-            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.2", 1, true) and (txt:find("v4.5.1", 1, true) or txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
-                obj.Text = txt:gsub("v4%.3", "v4.5.2"):gsub("v4%.4", "v4.5.2"):gsub("v4%.5%.1", "v4.5.2"):gsub("v4%.5", "v4.5.2"):gsub("v3%.0", "v4.5.2")
+            if txt:find("CAC Ultimate", 1, true) and not txt:find("v4.5.3", 1, true) and (txt:find("v4.5.2", 1, true) or txt:find("v4.5.1", 1, true) or txt:find("v4.5", 1, true) or txt:find("v4.4", 1, true) or txt:find("v4.3", 1, true) or txt:find("v3.0", 1, true)) then
+                obj.Text = txt:gsub("v4%.3", "v4.5.3"):gsub("v4%.4", "v4.5.3"):gsub("v4%.5%.2", "v4.5.3"):gsub("v4%.5%.1", "v4.5.3"):gsub("v4%.5", "v4.5.3"):gsub("v3%.0", "v4.5.3")
             end
 
             if txt == "PROCESS STATUS" then
@@ -5835,7 +5853,7 @@ function UnlockUI()
     })
 
     TabHome:CreateSection("Information")
-    TabHome:CreateLabel("v4.5.2 (Auto publish debug hotfix.)")
+    TabHome:CreateLabel("v4.5.3 (No session kick hotfix.)")
     TabHome:CreateLabel("Executor: " .. tostring(ExecutorName))
     TabHome:CreateLabel("UI Library Source: " .. tostring(LibrarySource))
     TabHome:CreateLabel("Queue Save Path: " .. tostring(QueueStatePath))
@@ -6207,7 +6225,7 @@ LicenseTab:CreateButton({
     Callback = function()
         local ok, err = ValidateSessionNow(true)
         if not ok then
-            Notify("Error", err or "Session validation failed.")
+            Notify("Session Notice", NormalizeSessionRecheckMessage(err or "Session recheck failed. Login again when convenient."))
         end
     end
 })
